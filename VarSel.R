@@ -1,13 +1,19 @@
+#   Description:
+#   This script aims at performing cross-validation with embedded stepwise variable selection 
+#   and assessment of the performance of the resulting model (selected features)
+
 library(mlr)
 
+### Nested resampling
+
+# modify data
 gam.data$Date <- NULL
 
 # define classification task
 task <- makeClassifTask(data = gam.data,
-                        target = "Acc", positive = "TRUE",
-                        coordinates = ???)
+                        target = "Acc", positive = "TRUE")
 
-configureMlr(on.learner.error = "warn", on.error.dump = TRUE)
+configureMlr(on.learner.error = "warn", on.error.dump = FALSE)
 
 # define a MLR learner
 lrn <- makeLearner("classif.binomial",
@@ -15,48 +21,54 @@ lrn <- makeLearner("classif.binomial",
                    predict.type = "prob",
                    fix.factors.prediction = TRUE)
 
-# define the resampling task (RepCV oder CV?)
-# Patrick: RepCV for a robust result -> But I assume that your data is 
-# spatial right? So then please use "SpRepCV". You need to supply coordinates
-# for it to work. See https://mlr.mlr-org.com/articles/tutorial/handling_of_spatial_data.html
-resampling <- makeResampleDesc(method = "SpRepCV", folds = 5, reps = 2)
+# define the resampling task 
+# RepCV: here iters = folds * reps
+# later: increase reps = 2 to reps = 100
+inner <- makeResampleDesc(method = "RepCV", folds = 5, reps = 2, predict = "both")
 
 # choice of feature selection method (with sequential search forward)
-# Patrick: Just some questions: Why is alpha set to 0.001?
-ctrl <- makeFeatSelControlSequential(method = "sfs", maxit = NA, alpha = 0.001)
+ctrl <- makeFeatSelControlSequential(method = "sfs", maxit = NA, alpha = 0.01)
+ctrl
 
-# Perform the method
-# result <- selectFeatures(mL,task, resampling, control = ctrl, measures = mlr::auc)
+# generate wrapped learner
+wrapper_glm <- makeFeatSelWrapper(lrn, resampling = inner, control = ctrl, show.info = TRUE)
 
-# Retrieve AUC and selected variables
-analyzeFeatSelResult(result)
+# train the defined classifier on the predefined task
+mod <- train(wrapper_glm, task)
+mod
+# extract result of the feature selection 
+sfeats = getFeatSelResult(mod)
+sfeats
+# the selected features are:
+sfeats$x
+# extract the model outcomes
+model_glm <- getLearnerModel(mod)
+summary(model_glm)
 
-wrapper_glm <- makeFeatSelWrapper(mL, resampling, control = ctrl, show.info = T)
 
-# parallelize your code
-# "multicore" only works on Linux. If you need to run on Windows, use "socket" instead
-# and remove "mc.set.seed"
-parallelStart(
-  mode = "multicore", cpus = 3, level = "mlr.selectFeatures",
-  mc.set.seed = TRUE
-)
+### Outer resampling loop
+
+# later: increase reps = 2 to reps = 100
+outer = makeResampleDesc(method = "RepCV", folds = 5, reps = 2, predict = "both")
+
+# Parrelization of ML models
+library(parallelMap) 
+parallelStart(mode = "socket", cpus = 3, level = "mlr.selectFeatures")
+
 set.seed(12345, kind = "L'Ecuyer-CMRG")
 
-res <- resample (wrapper_glm, task, extract = getFeatSelResult,
-                 models = TRUE,
-                 resampling = resampling,
-                 show.info = TRUE, measures = list(auc, timetrain)
-)
+# The 5-fold cross-validated performance of the learner can be computed as follows:
+res <- resample(wrapper_glm, task, extract = getFeatSelResult,
+                models = TRUE,
+                resampling = outer,
+                show.info = TRUE, measures = list(auc, timetrain))
 
 parallelStop()
 
+res
+res$aggr
 summary(res$measures.test$auc)
+res$measures.test
 
-# train the defined classifier on the predefined task
-# Patrick: Here you also need to make a SFS on the task. In the same way as you 
-# did it in each fold of the CV
-model <- train(lrn, task)
-
-# extract the model outcomes
-model_glm <- getLearnerModel(model)
-summary(model_glm)
+# extract the selected feature sets in the individual resampling iterations 
+lapply(res$models, getFeatSelResult)
